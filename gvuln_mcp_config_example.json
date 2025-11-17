@@ -1,0 +1,12 @@
+{
+  "name": "GVULN",
+  "type": "stdio",
+  "command": "/app/mcp/gvuln_mcp/mcp_gvuln_server.py",
+  "args": [],
+  "env": {
+    "ES_URL": "http://host.docker.internal:9200",
+    "ES_IDX": "tickets_enviados_jira"
+  },
+  "is_active": true,
+  "description": "Servidor MCP para análise de vulnerabilidades do índice tickets_enviados_jira. Fornece 13 ferramentas para análise de tickets de vulnerabilidades, incluindo top squads, remediações, distribuição de severidade, ativos críticos, e muito mais."
+}
