@@ -1,0 +1,74 @@
+# Docker Compose - Apenas Infraestrutura
+# ========================================
+# PostgreSQL, Redis e Elasticsearch rodando no Docker
+# Backend, Celery, Frontend rodam nativamente no Mac
+
+services:
+  # PostgreSQL (metadados do sistema)
+  postgres:
+    image: postgres:16-alpine
+    container_name: intelligence-platform-postgres
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: intelligence_user
+      POSTGRES_PASSWORD: intelligence_pass_secure_2024
+      POSTGRES_DB: intelligence_platform
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --lc-collate=C --lc-ctype=C"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - intelligence-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U intelligence_user -d intelligence_platform"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Redis (cache e broker do Celery)
+  redis:
+    image: redis:7-alpine
+    container_name: intelligence-platform-redis
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - intelligence-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+
+  # Elasticsearch (já está rodando externamente, mas deixo aqui caso queira mover)
+  # elasticsearch:
+  #   image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+  #   container_name: intelligence-platform-elasticsearch
+  #   ports:
+  #     - "9200:9200"
+  #     - "9300:9300"
+  #   environment:
+  #     - discovery.type=single-node
+  #     - xpack.security.enabled=false
+  #     - "ES_JAVA_OPTS=-Xms2g -Xmx2g"
+  #   volumes:
+  #     - elasticsearch_data:/usr/share/elasticsearch/data
+  #   networks:
+  #     - intelligence-network
+  #   restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  # elasticsearch_data:
+  #   driver: local
+
+networks:
+  intelligence-network:
+    driver: bridge

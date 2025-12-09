@@ -1,0 +1,320 @@
+"""
+RSS Chat Service with RAG
+Chat interface for querying RSS articles using LLM with context retrieval
+"""
+
+import logging
+from typing import List, Dict, Any, Optional
+from datetime import datetime
+
+from elasticsearch import Elasticsearch
+
+from app.services.rss_elasticsearch import RSSElasticsearchService
+from app.schemas.rss import RSSArticle, RSSChatRequest, RSSChatResponse
+
+logger = logging.getLogger(__name__)
+
+
+class RSSChatService:
+    """
+    RSS Chat Service with RAG (Retrieval Augmented Generation)
+    Uses Elasticsearch to find relevant articles and LLM to answer questions
+    """
+
+    def __init__(self, es_client: Elasticsearch, llm_service, index_alias: str = "rss-articles"):
+        self.es_service = RSSElasticsearchService(es_client, index_alias)
+        self.llm_service = llm_service
+        self.index_alias = index_alias
+
+    async def chat(self, request: RSSChatRequest) -> RSSChatResponse:
+        """
+        Answer user question using RAG over RSS articles
+
+        Args:
+            request: Chat request with query and filters
+
+        Returns:
+            Chat response with answer and sources
+        """
+        logger.info(f"💬 RSS Chat query: {request.query[:100]}...")
+
+        # Step 1: Retrieve relevant articles from Elasticsearch
+        articles = await self._retrieve_relevant_articles(request)
+
+        if not articles:
+            # No articles found
+            return RSSChatResponse(
+                answer="Não encontrei artigos relevantes para responder sua pergunta. Tente reformular ou ajustar os filtros de data/categoria.",
+                sources=[],
+                query=request.query,
+                context_used=0,
+                model_used="none",
+            )
+
+        # Step 2: Format context for LLM
+        context = self._format_context(articles)
+
+        # Step 3: Build prompt
+        prompt = self._build_prompt(request.query, context)
+
+        # Step 4: Call LLM
+        try:
+            # Ensure LLM client is initialized
+            if not self.llm_service.llm_client:
+                logger.error("❌ LLM client not initialized")
+                answer = "Erro: LLM não configurado. Configure um provider LLM nas configurações."
+                model_used = "none"
+            else:
+                # Access the underlying LLM client - use messages format like dashboard chat
+                llm_response = await self.llm_service.llm_client.generate(
+                    messages=[{"role": "user", "content": prompt}],
+                    system=None,
+                    max_tokens=1000,
+                    temperature=0.3,
+                )
+
+                answer = llm_response.get('response', llm_response.get('content', ''))
+
+                # Get model info from provider
+                provider_info = self.llm_service.llm_client.get_provider_info()
+                model_used = provider_info.get('model', 'unknown')
+
+        except Exception as e:
+            logger.error(f"❌ LLM generation error: {e}")
+            answer = f"Erro ao gerar resposta: {str(e)}"
+            model_used = "error"
+
+        # Step 5: Return response with sources
+        return RSSChatResponse(
+            answer=answer,
+            sources=articles,
+            query=request.query,
+            context_used=len(articles),
+            model_used=model_used,
+        )
+
+    async def _retrieve_relevant_articles(self, request: RSSChatRequest) -> List[RSSArticle]:
+        """
+        Retrieve relevant articles from Elasticsearch based on query and filters
+
+        Args:
+            request: Chat request
+
+        Returns:
+            List of relevant articles
+        """
+        try:
+            # Search with user query and filters
+            # Run sync ES operation in thread pool
+            import asyncio
+            result = await asyncio.to_thread(
+                self.es_service.search_articles,
+                query=request.query,
+                categories=request.categories,
+                date_from=request.date_from,
+                date_to=request.date_to,
+                limit=request.max_context_articles,
+                offset=0,
+                sort_by="published",
+                sort_order="desc",
+            )
+
+            # Convert to RSSArticle objects
+            articles = []
+            for art_dict in result.get('articles', []):
+                try:
+                    # Ensure required fields match new schema
+                    article = RSSArticle(
+                        content_hash=art_dict.get('content_hash', ''),  # Changed from article_id
+                        title=art_dict.get('title', ''),
+                        link=art_dict.get('link', ''),
+                        published=datetime.fromisoformat(art_dict['published'].replace('Z', '+00:00')),
+                        summary=art_dict.get('summary', ''),
+                        author=art_dict.get('author'),
+                        tags=art_dict.get('tags', []),
+                        feed_name=art_dict.get('feed_name', ''),
+                        category=art_dict.get('category', ''),
+                        feed_title=art_dict.get('feed_title'),
+                        feed_description=art_dict.get('feed_description'),
+                        feed_link=art_dict.get('feed_link'),
+                        feed_updated=art_dict.get('feed_updated'),
+                        collected_at=datetime.fromisoformat(art_dict['collected_at'].replace('Z', '+00:00')),  # Changed from created_at
+                        source_type=art_dict.get('source_type', 'rss_feed'),
+                        sentiment=art_dict.get('sentiment'),
+                        entities=art_dict.get('entities'),
+                        keywords=art_dict.get('keywords'),
+                    )
+                    articles.append(article)
+                except Exception as e:
+                    logger.warning(f"⚠️ Error parsing article: {e}")
+                    continue
+
+            logger.info(f"📚 Retrieved {len(articles)} relevant articles")
+            return articles
+
+        except Exception as e:
+            logger.error(f"❌ Error retrieving articles: {e}")
+            return []
+
+    def _format_context(self, articles: List[RSSArticle]) -> str:
+        """
+        Format articles into context string for LLM
+
+        Args:
+            articles: List of relevant articles
+
+        Returns:
+            Formatted context string
+        """
+        if not articles:
+            return "Nenhum artigo disponível."
+
+        context_parts = []
+
+        for i, article in enumerate(articles, 1):
+            # Format date
+            date_str = article.published.strftime("%d/%m/%Y")
+
+            # Build article context
+            article_context = f"""
+Artigo {i}:
+Título: {article.title}
+Fonte: {article.feed_name}
+Categoria: {article.category}
+Data: {date_str}
+Resumo: {article.summary}
+Link: {article.link}
+"""
+            if article.tags:
+                article_context += f"Tags: {', '.join(article.tags[:5])}\n"  # Max 5 tags
+
+            context_parts.append(article_context.strip())
+
+        return "\n\n---\n\n".join(context_parts)
+
+    def _build_prompt(self, user_query: str, context: str) -> str:
+        """
+        Build prompt for LLM with context and query
+
+        Args:
+            user_query: User's question
+            context: Formatted context from articles
+
+        Returns:
+            Complete prompt string
+        """
+        prompt = f"""Você é um assistente de inteligência especializado em análise de notícias e informações de segurança cibernética, tecnologia e inteligência artificial.
+
+Sua tarefa é responder à pergunta do usuário com base APENAS nas notícias fornecidas abaixo. Use um tom profissional e objetivo.
+
+IMPORTANTE:
+- Responda em português brasileiro
+- Base sua resposta APENAS nas informações dos artigos fornecidos
+- Se a informação não estiver nos artigos, diga claramente "Não encontrei essa informação nos artigos disponíveis"
+- Cite as fontes quando relevante (ex: "Segundo a OpenAI..." ou "De acordo com artigo da CISA...")
+- Se houver múltiplas perspectivas, mencione todas
+- Seja conciso mas completo
+
+NOTÍCIAS DISPONÍVEIS:
+{context}
+
+PERGUNTA DO USUÁRIO:
+{user_query}
+
+RESPOSTA:"""
+
+        return prompt
+
+    async def generate_summary(
+        self,
+        category: Optional[str] = None,
+        days: int = 7,
+        max_articles: int = 20
+    ) -> str:
+        """
+        Generate automatic summary of recent articles
+
+        Args:
+            category: Optional category filter
+            days: Number of days to look back
+            max_articles: Maximum articles to include
+
+        Returns:
+            Summary text
+        """
+        from datetime import timedelta
+
+        # Get recent articles
+        date_from = datetime.now() - timedelta(days=days)
+
+        result = await self.es_service.search_articles(
+            query=None,
+            categories=[category] if category else None,
+            date_from=date_from,
+            limit=max_articles,
+            sort_by="published",
+            sort_order="desc",
+        )
+
+        articles_data = result.get('articles', [])
+
+        if not articles_data:
+            return f"Nenhum artigo encontrado nos últimos {days} dias."
+
+        # Convert to RSSArticle
+        articles = []
+        for art_dict in articles_data:
+            try:
+                article = RSSArticle(
+                    id=art_dict.get('content_hash', ''),
+                    title=art_dict.get('title', ''),
+                    link=art_dict.get('link', ''),
+                    published=datetime.fromisoformat(art_dict['published'].replace('Z', '+00:00')),
+                    summary=art_dict.get('summary', ''),
+                    author=art_dict.get('author', ''),
+                    tags=art_dict.get('tags', []),
+                    content_hash=art_dict.get('content_hash', ''),
+                    feed_name=art_dict.get('feed_name', ''),
+                    feed_title=art_dict.get('feed_title'),
+                    feed_link=art_dict.get('feed_link'),
+                    category=art_dict.get('category', ''),
+                    collected_at=datetime.fromisoformat(art_dict['collected_at'].replace('Z', '+00:00')),
+                    source_type=art_dict.get('source_type', 'rss_feed'),
+                )
+                articles.append(article)
+            except Exception as e:
+                logger.warning(f"⚠️ Error parsing article: {e}")
+                continue
+
+        # Format context
+        context = self._format_context(articles)
+
+        # Build summary prompt
+        category_str = f" da categoria {category}" if category else ""
+        prompt = f"""Você é um assistente de inteligência. Gere um resumo executivo das principais notícias{category_str} dos últimos {days} dias.
+
+NOTÍCIAS:
+{context}
+
+Crie um resumo estruturado com:
+1. Principais temas/tendências
+2. Notícias mais importantes (máximo 5)
+3. Insights ou padrões observados
+
+RESUMO EXECUTIVO:"""
+
+        try:
+            # Access the underlying LLM client - use messages format
+            llm_response = await self.llm_service.llm_client.generate(
+                messages=[{"role": "user", "content": prompt}],
+                system=None,
+                max_tokens=1500,
+                temperature=0.5,
+            )
+
+            summary = llm_response.get('response', llm_response.get('content', ''))
+            return summary
+
+        except Exception as e:
+            logger.error(f"❌ Error generating summary: {e}")
+            return f"Erro ao gerar resumo: {str(e)}"
