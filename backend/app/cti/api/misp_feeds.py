@@ -250,10 +250,29 @@ async def get_ioc_stats(
     Returns stats from the unified IOC index which contains both MISP and OTX data.
     """
     from app.cti.services.unified_ioc_service import UnifiedIOCService
+    from app.db.elasticsearch import get_es_client
 
     service = UnifiedIOCService()
     try:
         es_stats = await service.get_stats()
+
+        # Get last_sync from most recent last_seen
+        es = await get_es_client()
+        try:
+            last_sync_result = await es.search(
+                index="unified_iocs",
+                body={
+                    "size": 1,
+                    "sort": [{"last_seen": "desc"}],
+                    "_source": ["last_seen"]
+                }
+            )
+            hits = last_sync_result.get("hits", {}).get("hits", [])
+            last_sync = hits[0]["_source"]["last_seen"] if hits else None
+        except Exception:
+            last_sync = None
+        finally:
+            await es.close()
 
         # Map ES stats to MISPIoCStats format for backward compatibility
         return {
@@ -263,7 +282,7 @@ async def get_ioc_stats(
             "by_confidence": es_stats.get("by_confidence_level", {}),
             "by_feed": es_stats.get("by_source", {}),  # source = feed in new architecture
             "feeds_count": len(es_stats.get("by_source", {})),
-            "last_sync": None  # ES doesn't track global last_sync
+            "last_sync": last_sync
         }
     finally:
         await service.close()
