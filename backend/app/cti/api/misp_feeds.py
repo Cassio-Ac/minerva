@@ -316,24 +316,22 @@ async def list_iocs(
             sort_order="desc"
         )
 
-        # Transform response to match expected format
+        # Transform response to match frontend MISPIoC interface
         iocs = []
         for item in result.get("iocs", []):  # search_iocs returns "iocs" not "items"
             iocs.append({
                 "id": item.get("id") or item.get("ioc_id"),
-                "ioc_type": item.get("ioc_type"),
-                "ioc_value": item.get("ioc_value"),
+                "type": item.get("ioc_type"),  # Frontend expects "type"
+                "subtype": item.get("ioc_subtype"),
+                "value": item.get("ioc_value"),  # Frontend expects "value"
+                "context": item.get("context"),
                 "threat_actor": item.get("threat_actor"),
                 "malware_family": item.get("malware_family"),
                 "tags": item.get("tags", []),
                 "tlp": item.get("tlp"),
-                "confidence": item.get("confidence_score"),
-                "confidence_level": item.get("confidence_level"),
+                "confidence": item.get("confidence_level") or item.get("confidence_score"),
                 "first_seen": item.get("first_seen"),
-                "last_seen": item.get("last_seen"),
-                "source_names": item.get("source_names", []),
-                "source_count": item.get("source_count", 1),
-                "mitre_attack": item.get("mitre_attack", [])
+                "to_ids": True
             })
 
         total = result.get("total", 0)
