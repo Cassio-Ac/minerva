@@ -18,7 +18,9 @@ sio = socketio.AsyncServer(
         'http://localhost:3000',
         'http://127.0.0.1:5174',
         'http://127.0.0.1:5180',
-        'http://127.0.0.1:3000'
+        'http://127.0.0.1:3000',
+        'https://kaermohen.tailf4266d.ts.net',
+        'http://kaermohen.tailf4266d.ts.net'
     ],
     logger=True,
     engineio_logger=True

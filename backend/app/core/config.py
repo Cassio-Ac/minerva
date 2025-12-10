@@ -21,7 +21,13 @@ class Settings(BaseSettings):
     PORT: int = 8001
 
     # CORS
-    CORS_ORIGINS: List[str] = ["http://localhost:5174", "http://localhost:5180", "http://localhost:3000"]
+    CORS_ORIGINS: List[str] = [
+        "http://localhost:5174",
+        "http://localhost:5180",
+        "http://localhost:3000",
+        "https://kaermohen.tailf4266d.ts.net",
+        "http://kaermohen.tailf4266d.ts.net"
+    ]
 
     # Elasticsearch (opcional - pode ser configurado via UI)
     # Suporte para múltiplos servidores via página de Configurações
