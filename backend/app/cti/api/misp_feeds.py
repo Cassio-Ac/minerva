@@ -337,14 +337,14 @@ async def list_iocs(
             })
 
         total = result.get("total", 0)
-        pages = (total + limit - 1) // limit if total > 0 else 1
+        has_more = (offset + limit) < total
 
         return {
-            "items": iocs,
+            "iocs": iocs,  # Frontend expects "iocs" not "items"
             "total": total,
-            "page": result.get("page", 1),
-            "page_size": result.get("page_size", limit),
-            "pages": pages
+            "limit": limit,
+            "offset": offset,
+            "has_more": has_more
         }
 
     finally:
