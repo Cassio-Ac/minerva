@@ -601,7 +601,8 @@ class UnifiedIOCService:
             "query": query_body,
             "from": (page - 1) * page_size,
             "size": page_size,
-            "sort": sort
+            "sort": sort,
+            "track_total_hits": True
         }
 
         result = await es.search(index=UNIFIED_IOC_INDEX, body=body)

@@ -271,39 +271,84 @@ async def get_ioc_stats(
 
 @router.get("/iocs", summary="List IOCs with filtering")
 async def list_iocs(
-    search: Optional[str] = Query(None, description="Search in value, threat_actor, malware_family, comment"),
+    search: Optional[str] = Query(None, description="Search in value, threat_actor, malware_family"),
     ioc_type: Optional[str] = Query(None, description="Filter by IOC type (ip, domain, url, hash, email)"),
     threat_actor: Optional[str] = Query(None, description="Filter by threat actor"),
     malware_family: Optional[str] = Query(None, description="Filter by malware family"),
-    feed_id: Optional[str] = Query(None, description="Filter by feed ID"),
+    source: Optional[str] = Query(None, description="Filter by source (misp, otx)"),
+    tlp: Optional[str] = Query(None, description="Filter by TLP (white, green, amber, red)"),
     limit: int = Query(default=100, ge=1, le=1000, description="Number of IOCs to return"),
     offset: int = Query(default=0, ge=0, description="Offset for pagination"),
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Listar IOCs salvos no banco com filtros opcionais
+    List IOCs from Elasticsearch unified_iocs index.
 
-    **Filtros:**
-    - `search`: Busca em value, threat_actor, malware_family, comment
+    **Filters:**
+    - `search`: Full-text search in value, threat_actor, malware_family
     - `ioc_type`: ip, domain, url, hash, email
-    - `threat_actor`: Nome do threat actor
-    - `malware_family`: Nome da família de malware
-    - `feed_id`: UUID do feed
-    - `limit`: Quantidade máxima de resultados
-    - `offset`: Paginação
+    - `threat_actor`: Threat actor name
+    - `malware_family`: Malware family name
+    - `source`: Source name (misp, otx)
+    - `tlp`: TLP level
+    - `limit`: Max results (1-1000)
+    - `offset`: Pagination offset
     """
-    service = MISPFeedService(db)
-    iocs = await service.list_iocs(
-        search=search,
-        ioc_type=ioc_type,
-        threat_actor=threat_actor,
-        malware_family=malware_family,
-        feed_id=feed_id,
-        limit=limit,
-        offset=offset
-    )
-    return iocs
+    from app.cti.services.unified_ioc_service import UnifiedIOCService
+
+    service = UnifiedIOCService()
+
+    try:
+        # Calculate page from offset
+        page = (offset // limit) + 1
+
+        result = await service.search_iocs(
+            query=search,
+            ioc_type=ioc_type,
+            threat_actor=threat_actor,
+            malware_family=malware_family,
+            source_name=source,
+            tlp=tlp,
+            page=page,
+            page_size=limit,
+            sort_by="last_seen",
+            sort_order="desc"
+        )
+
+        # Transform response to match expected format
+        iocs = []
+        for item in result.get("iocs", []):  # search_iocs returns "iocs" not "items"
+            iocs.append({
+                "id": item.get("id") or item.get("ioc_id"),
+                "ioc_type": item.get("ioc_type"),
+                "ioc_value": item.get("ioc_value"),
+                "threat_actor": item.get("threat_actor"),
+                "malware_family": item.get("malware_family"),
+                "tags": item.get("tags", []),
+                "tlp": item.get("tlp"),
+                "confidence": item.get("confidence_score"),
+                "confidence_level": item.get("confidence_level"),
+                "first_seen": item.get("first_seen"),
+                "last_seen": item.get("last_seen"),
+                "source_names": item.get("source_names", []),
+                "source_count": item.get("source_count", 1),
+                "mitre_attack": item.get("mitre_attack", [])
+            })
+
+        total = result.get("total", 0)
+        pages = (total + limit - 1) // limit if total > 0 else 1
+
+        return {
+            "items": iocs,
+            "total": total,
+            "page": result.get("page", 1),
+            "page_size": result.get("page_size", limit),
+            "pages": pages
+        }
+
+    finally:
+        await service.close()
 
 
 @router.post("/feeds/test/{feed_type}", summary="Test specific feed type")
