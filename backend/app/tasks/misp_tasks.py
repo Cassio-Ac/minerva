@@ -124,17 +124,19 @@ async def _sync_all_feeds_async():
                     continue
 
                 if iocs:
-                    # Import IOCs to database
-                    imported = await service.import_iocs(iocs, feed_record_id)
+                    # Import IOCs directly to Elasticsearch (new architecture)
+                    stats = await service.import_iocs_to_es(iocs, feed_record_id, feed_name="misp")
+                    imported = stats.get('created', 0) + stats.get('updated', 0)
                     total_imported += imported
                     successful += 1
                     results.append({
                         "feed": feed_name,
                         "status": "success",
                         "fetched": len(iocs),
-                        "imported": imported
+                        "created": stats.get('created', 0),
+                        "updated": stats.get('updated', 0)
                     })
-                    logger.info(f"✅ {feed_name}: {len(iocs)} fetched, {imported} imported")
+                    logger.info(f"✅ {feed_name}: {len(iocs)} fetched, {stats.get('created', 0)} created, {stats.get('updated', 0)} updated")
                 else:
                     results.append({
                         "feed": feed_name,
@@ -260,18 +262,19 @@ async def _sync_single_feed_async(feed_type: str, limit: int = 1000):
         elif feed_type == "cins_badguys":
             iocs = service.fetch_cins_badguys_feed(limit=limit)
 
-        # Import IOCs
-        imported = 0
+        # Import IOCs directly to Elasticsearch (new architecture)
+        stats = {"created": 0, "updated": 0}
         if iocs:
-            imported = await service.import_iocs(iocs, feed_record_id)
-            logger.info(f"✅ {feed_name}: {len(iocs)} fetched, {imported} imported")
+            stats = await service.import_iocs_to_es(iocs, feed_record_id, feed_name="misp")
+            logger.info(f"✅ {feed_name}: {len(iocs)} fetched, {stats.get('created', 0)} created, {stats.get('updated', 0)} updated")
 
         result = {
             "feed": feed_name,
             "feed_type": feed_type,
             "status": "success",
             "fetched": len(iocs),
-            "imported": imported,
+            "created": stats.get('created', 0),
+            "updated": stats.get('updated', 0),
             "timestamp": datetime.now().isoformat()
         }
 
@@ -369,12 +372,13 @@ async def _quick_sync_async():
                 elif feed_type == "bambenek_dga":
                     iocs = service.fetch_bambenek_dga_feed(limit=limit)
 
-                # Import
+                # Import directly to Elasticsearch (new architecture)
                 if iocs:
-                    imported = await service.import_iocs(iocs, str(feed_record.id))
+                    stats = await service.import_iocs_to_es(iocs, str(feed_record.id), feed_name="misp")
+                    imported = stats.get('created', 0) + stats.get('updated', 0)
                     total_imported += imported
-                    results.append({"feed": feed_name, "imported": imported})
-                    logger.info(f"✅ {feed_name}: {imported} imported")
+                    results.append({"feed": feed_name, "created": stats.get('created', 0), "updated": stats.get('updated', 0)})
+                    logger.info(f"✅ {feed_name}: {stats.get('created', 0)} created, {stats.get('updated', 0)} updated")
 
             except Exception as e:
                 logger.error(f"❌ Error in quick sync {feed_type}: {e}")

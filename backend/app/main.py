@@ -29,7 +29,7 @@ from app.api.v1 import breaches  # Data Breaches & Leaks
 from app.api.v1 import cves  # CVE Detection
 from app.api.v1 import cpf  # CPF Lookup
 from app.api.v1 import telegram, telegram_blacklist  # Telegram Intelligence
-from app.cti.api import actors as cti_actors, families as cti_families, techniques as cti_techniques, enrichment as cti_enrichment, misp_feeds, ioc_enrichment, galaxy as cti_galaxy, otx_keys, otx_pulses, yara_rules  # CTI Module (isolated)
+from app.cti.api import actors as cti_actors, families as cti_families, techniques as cti_techniques, enrichment as cti_enrichment, misp_feeds, ioc_enrichment, galaxy as cti_galaxy, otx_keys, otx_pulses, yara_rules, unified_iocs  # CTI Module (isolated)
 from app.credentials.api import external_query as credentials_external_query  # Credentials Module
 from app.credentials.api import datalake as credentials_datalake  # Credentials Data Lake
 from app.websocket import sio
@@ -116,6 +116,7 @@ app.include_router(cti_galaxy.router, prefix="/api/v1/cti", tags=["CTI - MISP Ga
 app.include_router(otx_keys.router, prefix="/api/v1/cti/otx", tags=["CTI - OTX"])
 app.include_router(otx_pulses.router, prefix="/api/v1/cti/otx", tags=["CTI - OTX Pulses"])
 app.include_router(yara_rules.router, prefix="/api/v1/cti/yara", tags=["CTI - YARA Rules"])
+app.include_router(unified_iocs.router, prefix="/api/v1/cti", tags=["CTI - Unified IOCs"])
 
 # Credentials Module (Leaked Credentials Lookup)
 app.include_router(credentials_external_query.router, prefix="/api/v1", tags=["Credentials"])

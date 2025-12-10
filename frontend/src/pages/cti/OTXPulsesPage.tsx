@@ -20,6 +20,8 @@ import {
   Link as LinkIcon,
   CheckCircle,
   Clock,
+  List,
+  Calendar,
 } from 'lucide-react';
 import { useSettingsStore } from '@stores/settingsStore';
 import otxService, { OTXPulse, PulseDetailResponse, AdversaryItem, TagItem } from '../../services/cti/otxService';
@@ -46,6 +48,9 @@ const OTXPulsesPage: React.FC = () => {
   // Selected pulse detail
   const [selectedPulse, setSelectedPulse] = useState<PulseDetailResponse | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
+
+  // View mode
+  const [viewMode, setViewMode] = useState<'list' | 'timeline'>('timeline');
 
   // Load initial data
   useEffect(() => {
@@ -175,6 +180,23 @@ const OTXPulsesPage: React.FC = () => {
 
   const totalPages = Math.ceil(total / pageSize);
 
+  // Group pulses by date for timeline view
+  const groupPulsesByDate = (pulsesToGroup: OTXPulse[]) => {
+    const groups: Record<string, OTXPulse[]> = {};
+    pulsesToGroup.forEach(pulse => {
+      const date = pulse.created ? new Date(pulse.created).toLocaleDateString('pt-BR', {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric'
+      }) : 'Unknown Date';
+      if (!groups[date]) groups[date] = [];
+      groups[date].push(pulse);
+    });
+    return Object.entries(groups);
+  };
+
+  const groupedPulses = groupPulsesByDate(pulses);
+
   return (
     <div
       className="h-full overflow-hidden flex flex-col"
@@ -275,6 +297,30 @@ const OTXPulsesPage: React.FC = () => {
             <Search size={16} />
             Search
           </button>
+
+          {/* View Mode Toggle */}
+          <div className="flex rounded-lg overflow-hidden" style={{ border: `1px solid ${currentColors.border.default}` }}>
+            <button
+              onClick={() => setViewMode('list')}
+              className="px-3 py-2 flex items-center gap-1"
+              style={{
+                backgroundColor: viewMode === 'list' ? '#06b6d4' : currentColors.bg.secondary,
+                color: viewMode === 'list' ? '#fff' : currentColors.text.secondary,
+              }}
+            >
+              <List size={16} />
+            </button>
+            <button
+              onClick={() => setViewMode('timeline')}
+              className="px-3 py-2 flex items-center gap-1"
+              style={{
+                backgroundColor: viewMode === 'timeline' ? '#06b6d4' : currentColors.bg.secondary,
+                color: viewMode === 'timeline' ? '#fff' : currentColors.text.secondary,
+              }}
+            >
+              <Calendar size={16} />
+            </button>
+          </div>
         </div>
       </div>
 
@@ -306,7 +352,109 @@ const OTXPulsesPage: React.FC = () => {
                 Showing {((page - 1) * pageSize) + 1}-{Math.min(page * pageSize, total)} of {total} pulses
               </p>
 
-              {/* Pulses Feed */}
+              {/* Timeline View */}
+              {viewMode === 'timeline' ? (
+                <div className="relative">
+                  {/* Timeline line */}
+                  <div
+                    className="absolute left-3 top-0 bottom-0 w-0.5"
+                    style={{ backgroundColor: currentColors.border.default }}
+                  />
+
+                  {groupedPulses.map(([dateStr, datePulses]) => (
+                    <div key={dateStr} className="mb-6">
+                      {/* Date Header */}
+                      <div className="flex items-center gap-3 mb-3 sticky top-0 z-10 py-2" style={{ backgroundColor: currentColors.bg.secondary }}>
+                        <div
+                          className="w-6 h-6 rounded-full flex items-center justify-center z-10"
+                          style={{ backgroundColor: '#06b6d4' }}
+                        >
+                          <Calendar size={12} color="#fff" />
+                        </div>
+                        <span className="text-sm font-medium" style={{ color: currentColors.text.primary }}>
+                          {dateStr}
+                        </span>
+                        <span
+                          className="px-2 py-0.5 rounded-full text-xs"
+                          style={{ backgroundColor: currentColors.bg.tertiary, color: currentColors.text.secondary }}
+                        >
+                          {datePulses.length} pulse{datePulses.length > 1 ? 's' : ''}
+                        </span>
+                      </div>
+
+                      {/* Pulses for this date */}
+                      <div className="ml-9 space-y-2">
+                        {datePulses.map((pulse) => (
+                          <button
+                            key={pulse.id}
+                            onClick={() => handlePulseClick(pulse)}
+                            className="w-full p-3 rounded-lg text-left hover:opacity-90 transition-all border relative"
+                            style={{
+                              backgroundColor: selectedPulse?.pulse.id === pulse.id ? currentColors.bg.tertiary : currentColors.bg.primary,
+                              borderColor: selectedPulse?.pulse.id === pulse.id ? '#06b6d4' : currentColors.border.default,
+                            }}
+                          >
+                            {/* Timeline connector */}
+                            <div
+                              className="absolute -left-6 top-4 w-3 h-0.5"
+                              style={{ backgroundColor: currentColors.border.default }}
+                            />
+
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 mb-1 flex-wrap">
+                                  <span
+                                    className="px-1.5 py-0.5 rounded text-xs font-medium"
+                                    style={{
+                                      backgroundColor: getTLPColor(pulse.tlp),
+                                      color: pulse.tlp?.toLowerCase() === 'white' ? '#000' : '#fff',
+                                      border: pulse.tlp?.toLowerCase() === 'white' ? '1px solid #ccc' : 'none'
+                                    }}
+                                  >
+                                    TLP:{pulse.tlp?.toUpperCase() || 'N/A'}
+                                  </span>
+                                  <span className="text-xs" style={{ color: currentColors.text.muted }}>
+                                    {pulse.indicator_count.toLocaleString()} IOCs
+                                  </span>
+                                  {pulse.adversary && (
+                                    <span className="text-xs flex items-center gap-1" style={{ color: '#ef4444' }}>
+                                      <Users size={10} />
+                                      {pulse.adversary}
+                                    </span>
+                                  )}
+                                </div>
+                                <h3 className="font-medium text-sm line-clamp-2" style={{ color: currentColors.text.primary }}>
+                                  {pulse.name}
+                                </h3>
+                                {pulse.tags.length > 0 && (
+                                  <div className="flex gap-1 flex-wrap mt-1">
+                                    {pulse.tags.slice(0, 3).map((tag, i) => (
+                                      <span
+                                        key={i}
+                                        className="px-1.5 py-0.5 rounded text-xs"
+                                        style={{ backgroundColor: currentColors.bg.secondary, color: currentColors.text.secondary }}
+                                      >
+                                        {tag}
+                                      </span>
+                                    ))}
+                                    {pulse.tags.length > 3 && (
+                                      <span className="text-xs" style={{ color: currentColors.text.muted }}>
+                                        +{pulse.tags.length - 3}
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                              <ChevronRight size={14} style={{ color: currentColors.text.muted }} />
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+              /* List View */
               <div className="space-y-3">
                 {pulses.map((pulse) => (
                   <button
@@ -407,6 +555,7 @@ const OTXPulsesPage: React.FC = () => {
                   </button>
                 ))}
               </div>
+              )}
 
               {/* Pagination */}
               {totalPages > 1 && (

@@ -63,23 +63,14 @@ celery_app.conf.update(
             "schedule": crontab(minute=0, hour="*/2"),  # Every 2 hours
         },
 
-        # OTX pulse sync - 2x per day (09:00 and 21:00 Brazil time)
+        # OTX pulse sync - every 3 hours (syncs directly to Elasticsearch)
         "sync-otx-pulses": {
             "task": "app.tasks.otx_tasks.sync_otx_pulses",
-            "schedule": crontab(minute=0, hour="9,21"),  # 09:00 and 21:00
+            "schedule": crontab(minute=0, hour="*/3"),  # Every 3 hours (00:00, 03:00, 06:00, ...)
         },
 
-        # OTX bulk IOC enrichment - 1x per day (03:00 Brazil time)
-        "bulk-enrich-iocs-otx": {
-            "task": "app.tasks.otx_tasks.bulk_enrich_iocs",
-            "schedule": crontab(minute=0, hour=3),  # 03:00 AM
-        },
-
-        # OTX to MISP export - 1x per day (04:00 Brazil time)
-        "export-otx-pulses-to-misp": {
-            "task": "app.tasks.otx_tasks.export_pulses_to_misp",
-            "schedule": crontab(minute=0, hour=4),  # 04:00 AM
-        },
+        # DEPRECATED: bulk_enrich_iocs - IOCs are now enriched during ES sync
+        # DEPRECATED: export_pulses_to_misp - OTX data goes directly to ES
 
         # Reset OTX daily usage counters - 1x per day (00:00 Brazil time)
         "reset-otx-daily-usage": {

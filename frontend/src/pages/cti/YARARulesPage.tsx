@@ -97,12 +97,12 @@ const YARARulesPage: React.FC = () => {
       setLoading(true);
       try {
         const params: any = { page: 1, page_size: pageSize };
+        // Use search for threat_actor (field often empty, but name is in rule_name/description)
         if (searchTerm) params.search = searchTerm;
         if (urlCategory) params.category = urlCategory;
         if (urlFamily) params.malware_family = urlFamily;
         if (urlSource) params.source = urlSource;
-        // Also support threat_actor as API param
-        if (urlThreatActor) params.threat_actor = urlThreatActor;
+        // Note: threat_actor field is mostly empty in ES, so we rely on search instead
 
         const data = await yaraService.listRules(params);
         setRules(data.rules);

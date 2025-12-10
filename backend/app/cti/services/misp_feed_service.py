@@ -1632,3 +1632,234 @@ class MISPFeedService:
         await self.db.commit()
         await self.db.refresh(feed)
         return feed
+
+    # ============ ELASTICSEARCH DIRECT INGESTION ============
+
+    async def import_iocs_to_es(
+        self,
+        iocs: List[Dict],
+        feed_id: str,
+        feed_name: str = "misp"
+    ) -> Dict[str, int]:
+        """
+        Import IOCs directly to Elasticsearch unified_iocs index.
+
+        This is the new architecture - IOCs go directly to ES, not PostgreSQL.
+        PostgreSQL only stores feed configuration.
+
+        Args:
+            iocs: List of IOC dicts with type, value, context, etc.
+            feed_id: UUID of the feed (for reference)
+            feed_name: Name of the feed source
+
+        Returns:
+            Dict with created, updated, errors counts
+        """
+        from app.cti.services.unified_ioc_service import UnifiedIOCService
+        from app.db.elasticsearch import get_es_client
+
+        logger.info(f"📥 Importing {len(iocs)} IOCs directly to Elasticsearch...")
+
+        # Get ES client
+        es = await get_es_client()
+        service = UnifiedIOCService(es)
+
+        # Ensure index exists
+        await service.ensure_index()
+
+        # Transform IOCs to unified format
+        transformed = []
+        for ioc_data in iocs:
+            try:
+                unified = {
+                    "value": ioc_data.get("value", "").strip(),
+                    "type": ioc_data.get("type", "other"),
+                    "subtype": ioc_data.get("subtype"),
+                    "context": ioc_data.get("context"),
+                    "malware_family": ioc_data.get("malware_family"),
+                    "threat_actor": ioc_data.get("threat_actor"),
+                    "tags": ioc_data.get("tags", []),
+                    "tlp": ioc_data.get("tlp", "white"),
+                    "confidence": self._map_confidence(ioc_data.get("confidence", "medium")),
+                    "to_ids": ioc_data.get("to_ids", False),
+                    "first_seen": ioc_data.get("first_seen"),
+                    "source_ref": f"misp-feed:{feed_id}",
+                    "source_id": feed_id,
+                }
+
+                if unified["value"]:
+                    transformed.append(unified)
+            except Exception as e:
+                logger.warning(f"Error transforming IOC: {e}")
+
+        # Ingest batch to ES
+        stats = await service.ingest_batch(
+            iocs=transformed,
+            source_name=feed_name,
+            batch_size=250,
+            refresh_every=10
+        )
+
+        await service.close()
+
+        logger.info(
+            f"✅ ES Import complete: {stats['created']} new, "
+            f"{stats['updated']} updated, {stats['errors']} errors"
+        )
+
+        # Update feed sync timestamp in PostgreSQL (config only)
+        if self.db:
+            try:
+                from sqlalchemy import update
+                stmt = update(MISPFeed).where(MISPFeed.id == feed_id).values(
+                    last_sync_at=datetime.now(),
+                    total_iocs_imported=stats['created'] + stats['updated']
+                )
+                await self.db.execute(stmt)
+                await self.db.commit()
+            except Exception as e:
+                logger.warning(f"Could not update feed sync status: {e}")
+
+        return stats
+
+    def _map_confidence(self, conf: str) -> int:
+        """Map confidence string to numeric score"""
+        mapping = {
+            "high": 80,
+            "medium": 50,
+            "low": 30,
+        }
+        if isinstance(conf, int):
+            return conf
+        return mapping.get(str(conf).lower(), 50)
+
+    async def sync_feed_to_es(self, feed_id: str, limit: int = 1000) -> Dict:
+        """
+        Sync a specific feed directly to Elasticsearch.
+
+        This is the main sync method for the new architecture.
+
+        Args:
+            feed_id: Feed ID or name
+            limit: Max IOCs to fetch
+
+        Returns:
+            Sync result stats
+        """
+        if not self.db:
+            raise ValueError("Database session required")
+
+        # Get feed config from PostgreSQL
+        stmt = select(MISPFeed).where(
+            (MISPFeed.id == feed_id) | (MISPFeed.name == feed_id)
+        )
+        result = await self.db.execute(stmt)
+        feed = result.scalar_one_or_none()
+
+        if not feed:
+            raise ValueError(f"Feed not found: {feed_id}")
+
+        logger.info(f"🔄 Syncing feed '{feed.name}' to Elasticsearch...")
+
+        # Fetch IOCs based on feed type
+        iocs = []
+        feed_key = feed.name.lower().replace(" ", "_").replace("-", "_")
+
+        # Map feed names to fetch methods
+        fetch_methods = {
+            "circl_osint": lambda: self.fetch_circl_feed(limit=limit),
+            "urlhaus": lambda: self.fetch_urlhaus_feed(limit=limit),
+            "threatfox": lambda: self.fetch_threatfox_feed(limit=limit),
+            "openphish": lambda: self.fetch_openphish_feed(limit=limit),
+            "serpro": lambda: self.fetch_serpro_feed(limit=limit),
+            "bambenek_dga": lambda: self.fetch_bambenek_dga_feed(limit=limit),
+            "emerging_threats": lambda: self.fetch_emerging_threats_feed(limit=limit),
+            "alienvault_reputation": lambda: self.fetch_alienvault_reputation_feed(limit=limit),
+            "sslbl": lambda: self.fetch_sslbl_feed(limit=limit),
+            "digitalside": lambda: self.fetch_digitalside_feed(limit=limit),
+            "blocklist_de": lambda: self.fetch_blocklist_de_feed(limit=limit),
+            "greensnow": lambda: self.fetch_greensnow_feed(limit=limit),
+            "diamondfox_c2": lambda: self.fetch_diamondfox_c2_feed(limit=limit),
+            "cins_badguys": lambda: self.fetch_cins_badguys_feed(limit=limit),
+            "botvrij": lambda: self.fetch_botvrij_feed(limit=limit),
+        }
+
+        fetch_method = fetch_methods.get(feed_key)
+        if fetch_method:
+            iocs = fetch_method()
+        else:
+            logger.warning(f"No fetch method for feed: {feed_key}")
+            return {"error": f"Unknown feed type: {feed_key}"}
+
+        if not iocs:
+            logger.info(f"No IOCs fetched from {feed.name}")
+            return {"created": 0, "updated": 0, "errors": 0, "total": 0}
+
+        # Import directly to ES
+        stats = await self.import_iocs_to_es(
+            iocs=iocs,
+            feed_id=str(feed.id),
+            feed_name="misp"
+        )
+
+        return {
+            **stats,
+            "feed_name": feed.name,
+            "feed_id": str(feed.id)
+        }
+
+    async def sync_all_feeds_to_es(self, limit_per_feed: int = 500) -> Dict:
+        """
+        Sync all active feeds directly to Elasticsearch.
+
+        Args:
+            limit_per_feed: Max IOCs per feed
+
+        Returns:
+            Aggregated sync results
+        """
+        if not self.db:
+            raise ValueError("Database session required")
+
+        # Get all active feeds
+        stmt = select(MISPFeed).where(MISPFeed.is_active == True)
+        result = await self.db.execute(stmt)
+        feeds = result.scalars().all()
+
+        logger.info(f"🔄 Syncing {len(feeds)} active feeds to Elasticsearch...")
+
+        total_stats = {
+            "feeds_synced": 0,
+            "total_created": 0,
+            "total_updated": 0,
+            "total_errors": 0,
+            "feed_results": []
+        }
+
+        for feed in feeds:
+            try:
+                stats = await self.sync_feed_to_es(
+                    feed_id=str(feed.id),
+                    limit=limit_per_feed
+                )
+                total_stats["feeds_synced"] += 1
+                total_stats["total_created"] += stats.get("created", 0)
+                total_stats["total_updated"] += stats.get("updated", 0)
+                total_stats["total_errors"] += stats.get("errors", 0)
+                total_stats["feed_results"].append({
+                    "feed": feed.name,
+                    **stats
+                })
+            except Exception as e:
+                logger.error(f"Error syncing feed {feed.name}: {e}")
+                total_stats["feed_results"].append({
+                    "feed": feed.name,
+                    "error": str(e)
+                })
+
+        logger.info(
+            f"✅ All feeds synced: {total_stats['total_created']} created, "
+            f"{total_stats['total_updated']} updated"
+        )
+
+        return total_stats

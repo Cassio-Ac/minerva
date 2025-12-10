@@ -34,7 +34,7 @@ def sync_otx_pulses():
 
 
 async def _run_pulse_sync():
-    """Helper para executar sync de pulses de forma assíncrona"""
+    """Helper para executar sync de pulses direto para Elasticsearch"""
     from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
     from app.core.config import settings
     from app.cti.services.otx_pulse_sync_service import OTXPulseSyncService
@@ -45,8 +45,9 @@ async def _run_pulse_sync():
 
     async with async_session() as session:
         service = OTXPulseSyncService(session)
-        stats = await service.sync_subscribed_pulses(limit=100)
-        logger.info(f"📊 Sync stats: {stats}")
+        # Nova arquitetura: sync direto para Elasticsearch
+        stats = await service.sync_to_elasticsearch(limit=100)
+        logger.info(f"📊 ES Sync stats: pulses={stats.get('pulses_fetched', 0)}, created={stats.get('indicators_created', 0)}, updated={stats.get('indicators_updated', 0)}")
 
     await engine.dispose()
     return stats
@@ -55,21 +56,12 @@ async def _run_pulse_sync():
 @celery_app.task(name="app.tasks.otx_tasks.bulk_enrich_iocs")
 def bulk_enrich_iocs():
     """
-    Enriquece IOCs do MISP com dados OTX
+    DEPRECATED: Esta task usava tabelas PostgreSQL que foram removidas.
 
-    Executa 1x/dia: 03:00 (Brazil time)
-    Processa 200 IOCs de alta prioridade
+    Na nova arquitetura, os IOCs são enriquecidos durante o sync para Elasticsearch.
     """
-    logger.info("🔄 Starting scheduled bulk IOC enrichment...")
-
-    try:
-        asyncio.run(_run_bulk_enrichment())
-        logger.info("✅ Bulk IOC enrichment completed successfully")
-        return {"status": "success", "time": datetime.utcnow().isoformat()}
-
-    except Exception as e:
-        logger.error(f"❌ Bulk enrichment failed: {e}")
-        return {"status": "failed", "error": str(e)}
+    logger.warning("⚠️ bulk_enrich_iocs is DEPRECATED - IOCs are now enriched during ES sync")
+    return {"status": "deprecated", "message": "Task deprecated - IOCs enriched during ES sync"}
 
 
 async def _run_bulk_enrichment():
@@ -93,21 +85,12 @@ async def _run_bulk_enrichment():
 @celery_app.task(name="app.tasks.otx_tasks.export_pulses_to_misp")
 def export_pulses_to_misp():
     """
-    Exporta pulses OTX para MISP
+    DEPRECATED: Esta task usava tabelas PostgreSQL que foram removidas.
 
-    Executa 1x/dia: 04:00 (Brazil time)
-    Processa até 20 pulses pendentes
+    Na nova arquitetura, os dados OTX vão direto para Elasticsearch unified_iocs.
     """
-    logger.info("🔄 Starting scheduled MISP export...")
-
-    try:
-        asyncio.run(_run_misp_export())
-        logger.info("✅ MISP export completed successfully")
-        return {"status": "success", "time": datetime.utcnow().isoformat()}
-
-    except Exception as e:
-        logger.error(f"❌ MISP export failed: {e}")
-        return {"status": "failed", "error": str(e)}
+    logger.warning("⚠️ export_pulses_to_misp is DEPRECATED - OTX data now goes directly to ES")
+    return {"status": "deprecated", "message": "Task deprecated - OTX data goes directly to ES"}
 
 
 async def _run_misp_export():

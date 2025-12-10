@@ -194,11 +194,11 @@ async def get_pulse_detail(
         "indicators": [
             {
                 "id": str(i.id),
-                "type": i.indicator_type,
+                "type": i.type,
                 "value": i.indicator,
                 "title": i.title,
                 "description": i.description,
-                "created": i.created
+                "created": i.created_at
             } for i in indicators
         ],
         "indicators_shown": len(indicators),

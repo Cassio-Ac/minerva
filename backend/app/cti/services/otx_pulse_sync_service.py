@@ -437,3 +437,335 @@ class OTXPulseSyncService:
                 for p in recent_pulses
             ]
         }
+
+    # ============ ELASTICSEARCH DIRECT SYNC ============
+
+    async def sync_to_elasticsearch(self, limit: int = 50) -> Dict:
+        """
+        Sync OTX pulses directly to Elasticsearch unified_iocs index.
+
+        This is the new architecture - IOCs go directly to ES, not PostgreSQL.
+        Only sync history is stored in PostgreSQL.
+
+        Args:
+            limit: Number of pulses to fetch
+
+        Returns:
+            Sync statistics
+        """
+        from app.cti.services.unified_ioc_service import UnifiedIOCService
+        from app.db.elasticsearch import get_es_client
+
+        logger.info(f"🔄 Starting OTX sync to Elasticsearch (limit={limit})")
+
+        # Create sync history in PostgreSQL
+        sync_history = OTXSyncHistory(
+            sync_type="pulse_sync_es",
+            started_at=datetime.utcnow(),
+            status="running"
+        )
+        self.session.add(sync_history)
+        await self.session.commit()
+
+        stats = {
+            "pulses_fetched": 0,
+            "indicators_created": 0,
+            "indicators_updated": 0,
+            "indicators_errors": 0,
+            "errors": []
+        }
+
+        try:
+            # Get OTX API key
+            key = await self.key_manager.get_available_key()
+            if not key:
+                raise Exception("No OTX API keys available")
+
+            sync_history.api_key_id = key.id
+            await self.session.commit()
+
+            # Fetch pulses via REST API
+            logger.info("📥 Fetching pulses from OTX API...")
+            headers = {"X-OTX-API-KEY": key.api_key}
+
+            response = requests.get(
+                f"{OTX_API_BASE}/pulses/subscribed",
+                headers=headers,
+                params={"limit": limit, "page": 1},
+                timeout=60
+            )
+            response.raise_for_status()
+            pulses_data = response.json()
+
+            if not pulses_data or 'results' not in pulses_data:
+                logger.warning("⚠️ No pulses returned from OTX")
+                sync_history.status = "completed"
+                sync_history.completed_at = datetime.utcnow()
+                await self.session.commit()
+                return stats
+
+            pulses = pulses_data.get('results', [])
+            stats['pulses_fetched'] = len(pulses)
+            logger.info(f"✅ Fetched {len(pulses)} pulses from OTX")
+
+            # Get ES client
+            es = await get_es_client()
+            ioc_service = UnifiedIOCService(es)
+            await ioc_service.ensure_index()
+
+            # Process each pulse and send indicators to ES
+            for pulse in pulses:
+                try:
+                    pulse_stats = await self._process_pulse_to_es(
+                        pulse, ioc_service
+                    )
+                    stats['indicators_created'] += pulse_stats.get('created', 0)
+                    stats['indicators_updated'] += pulse_stats.get('updated', 0)
+                    stats['indicators_errors'] += pulse_stats.get('errors', 0)
+
+                except Exception as e:
+                    logger.error(f"❌ Error processing pulse {pulse.get('id')}: {e}")
+                    stats['errors'].append(str(e))
+
+            await ioc_service.close()
+
+            # Record API usage
+            await self.key_manager.record_request(key, success=True)
+
+            # Update sync history
+            sync_history.status = "completed"
+            sync_history.completed_at = datetime.utcnow()
+            sync_history.pulses_fetched = stats['pulses_fetched']
+            sync_history.indicators_processed = (
+                stats['indicators_created'] + stats['indicators_updated']
+            )
+            await self.session.commit()
+
+            logger.info(
+                f"✅ OTX ES sync completed: {stats['indicators_created']} created, "
+                f"{stats['indicators_updated']} updated"
+            )
+            return stats
+
+        except Exception as e:
+            logger.error(f"❌ OTX ES sync failed: {e}")
+            sync_history.status = "failed"
+            sync_history.error_message = str(e)
+            sync_history.completed_at = datetime.utcnow()
+            await self.session.commit()
+            raise
+
+    async def _process_pulse_to_es(
+        self,
+        pulse_data: Dict,
+        ioc_service
+    ) -> Dict[str, int]:
+        """
+        Process a single pulse and send indicators directly to ES.
+
+        Args:
+            pulse_data: Pulse data from OTX API
+            ioc_service: UnifiedIOCService instance
+
+        Returns:
+            Stats with created, updated, errors counts
+        """
+        indicators = pulse_data.get('indicators', [])
+
+        if not indicators:
+            return {"created": 0, "updated": 0, "errors": 0}
+
+        # Transform indicators to unified format
+        transformed = []
+        for ind in indicators:
+            try:
+                indicator_value = ind.get('indicator')
+                indicator_type = ind.get('type')
+
+                if not indicator_value or not indicator_type:
+                    continue
+
+                unified = {
+                    "value": indicator_value,
+                    "type": self._normalize_otx_type(indicator_type),
+                    "subtype": indicator_type,
+                    "context": ind.get('description') or pulse_data.get('description', ''),
+                    "malware_family": self._extract_malware(pulse_data),
+                    "threat_actor": pulse_data.get('adversary'),
+                    "tags": pulse_data.get('tags', []),
+                    "tlp": pulse_data.get('TLP', 'white'),
+                    "mitre_attack": pulse_data.get('attack_ids', []),
+                    "references": pulse_data.get('references', []),
+                    "targeted_countries": pulse_data.get('targeted_countries', []),
+                    "targeted_industries": pulse_data.get('industries', []),
+                    "confidence": 60,  # Default OTX confidence
+                    "source_ref": f"otx-pulse:{pulse_data.get('id')}",
+                    "source_id": pulse_data.get('id'),
+                }
+
+                transformed.append(unified)
+
+            except Exception as e:
+                logger.warning(f"Error transforming indicator: {e}")
+
+        if not transformed:
+            return {"created": 0, "updated": 0, "errors": 0}
+
+        # Ingest batch to ES
+        stats = await ioc_service.ingest_batch(
+            iocs=transformed,
+            source_name="otx",
+            batch_size=200,
+            refresh_every=5
+        )
+
+        return stats
+
+    def _normalize_otx_type(self, otx_type: str) -> str:
+        """Normalize OTX indicator type to unified type"""
+        type_mapping = {
+            "IPv4": "ip",
+            "IPv6": "ip",
+            "domain": "domain",
+            "hostname": "domain",
+            "URL": "url",
+            "FileHash-MD5": "hash",
+            "FileHash-SHA1": "hash",
+            "FileHash-SHA256": "hash",
+            "email": "email",
+            "CVE": "cve",
+            "YARA": "yara",
+            "CIDR": "ip",
+        }
+        return type_mapping.get(otx_type, "other")
+
+    def _extract_malware(self, pulse_data: Dict) -> Optional[str]:
+        """Extract malware family from pulse data"""
+        families = pulse_data.get('malware_families', [])
+        if families:
+            return families[0] if isinstance(families[0], str) else families[0].get('display_name')
+        return None
+
+    async def sync_search_to_elasticsearch(self, query: str, limit: int = 20) -> Dict:
+        """
+        Search OTX pulses and sync results directly to Elasticsearch.
+
+        Args:
+            query: Search query (tags, adversary, malware)
+            limit: Max pulses to fetch
+
+        Returns:
+            Sync statistics
+        """
+        from app.cti.services.unified_ioc_service import UnifiedIOCService
+        from app.db.elasticsearch import get_es_client
+
+        logger.info(f"🔍 Searching OTX for '{query}' and syncing to ES (limit={limit})")
+
+        # Create sync history
+        sync_history = OTXSyncHistory(
+            sync_type=f"pulse_search_es:{query}",
+            started_at=datetime.utcnow(),
+            status="running"
+        )
+        self.session.add(sync_history)
+        await self.session.commit()
+
+        stats = {
+            "pulses_fetched": 0,
+            "indicators_created": 0,
+            "indicators_updated": 0,
+            "indicators_errors": 0,
+            "errors": []
+        }
+
+        try:
+            # Get API key
+            key = await self.key_manager.get_available_key()
+            if not key:
+                raise Exception("No OTX API keys available")
+
+            sync_history.api_key_id = key.id
+            await self.session.commit()
+
+            # Search pulses
+            logger.info(f"📥 Searching OTX for: {query}")
+            headers = {"X-OTX-API-KEY": key.api_key}
+
+            response = requests.get(
+                f"{OTX_API_BASE}/search/pulses",
+                headers=headers,
+                params={"q": query, "limit": limit, "page": 1},
+                timeout=60
+            )
+            response.raise_for_status()
+            search_results = response.json()
+
+            if not search_results or 'results' not in search_results:
+                logger.warning(f"⚠️ No results for query: {query}")
+                sync_history.status = "completed"
+                sync_history.completed_at = datetime.utcnow()
+                await self.session.commit()
+                return stats
+
+            pulses = search_results.get('results', [])
+            stats['pulses_fetched'] = len(pulses)
+            logger.info(f"✅ Found {len(pulses)} pulses")
+
+            # Get ES client
+            es = await get_es_client()
+            ioc_service = UnifiedIOCService(es)
+            await ioc_service.ensure_index()
+
+            # Process each pulse
+            for pulse_summary in pulses:
+                try:
+                    # Get full pulse details
+                    pulse_id = pulse_summary.get('id')
+                    pulse_resp = requests.get(
+                        f"{OTX_API_BASE}/pulses/{pulse_id}",
+                        headers=headers,
+                        timeout=30
+                    )
+                    pulse_resp.raise_for_status()
+                    full_pulse = pulse_resp.json()
+
+                    # Process to ES
+                    pulse_stats = await self._process_pulse_to_es(
+                        full_pulse, ioc_service
+                    )
+                    stats['indicators_created'] += pulse_stats.get('created', 0)
+                    stats['indicators_updated'] += pulse_stats.get('updated', 0)
+                    stats['indicators_errors'] += pulse_stats.get('errors', 0)
+
+                except Exception as e:
+                    logger.error(f"❌ Error processing pulse: {e}")
+                    stats['errors'].append(str(e))
+
+            await ioc_service.close()
+
+            # Record API usage
+            await self.key_manager.record_request(key, success=True)
+
+            # Update sync history
+            sync_history.status = "completed"
+            sync_history.completed_at = datetime.utcnow()
+            sync_history.pulses_fetched = stats['pulses_fetched']
+            sync_history.indicators_processed = (
+                stats['indicators_created'] + stats['indicators_updated']
+            )
+            await self.session.commit()
+
+            logger.info(
+                f"✅ OTX search sync completed: {stats['indicators_created']} created, "
+                f"{stats['indicators_updated']} updated"
+            )
+            return stats
+
+        except Exception as e:
+            logger.error(f"❌ OTX search sync failed: {e}")
+            sync_history.status = "failed"
+            sync_history.error_message = str(e)
+            sync_history.completed_at = datetime.utcnow()
+            await self.session.commit()
+            raise
