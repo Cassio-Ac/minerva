@@ -642,6 +642,7 @@ class UnifiedIOCService:
 
         body = {
             "size": 0,
+            "track_total_hits": True,  # Get exact count, not limited to 10000
             "aggs": {
                 "total_active": {"filter": {"term": {"is_active": True}}},
                 "by_type": {"terms": {"field": "ioc_type", "size": 20}},

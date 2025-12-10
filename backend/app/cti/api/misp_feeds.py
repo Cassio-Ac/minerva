@@ -245,11 +245,28 @@ async def get_ioc_stats(
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Obter estatísticas de IOCs importados
+    Obter estatísticas de IOCs do Elasticsearch (unified_iocs index)
+
+    Returns stats from the unified IOC index which contains both MISP and OTX data.
     """
-    service = MISPFeedService(db)
-    stats = await service.get_ioc_stats()
-    return stats
+    from app.cti.services.unified_ioc_service import UnifiedIOCService
+
+    service = UnifiedIOCService()
+    try:
+        es_stats = await service.get_stats()
+
+        # Map ES stats to MISPIoCStats format for backward compatibility
+        return {
+            "total_iocs": es_stats.get("total_iocs", 0),
+            "by_type": es_stats.get("by_type", {}),
+            "by_tlp": es_stats.get("by_tlp", {}),
+            "by_confidence": es_stats.get("by_confidence_level", {}),
+            "by_feed": es_stats.get("by_source", {}),  # source = feed in new architecture
+            "feeds_count": len(es_stats.get("by_source", {})),
+            "last_sync": None  # ES doesn't track global last_sync
+        }
+    finally:
+        await service.close()
 
 
 @router.get("/iocs", summary="List IOCs with filtering")
