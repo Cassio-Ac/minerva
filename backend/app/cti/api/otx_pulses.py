@@ -243,37 +243,57 @@ async def get_pulse_detail(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Get detailed information about a specific pulse including indicators from Elasticsearch.
+    Get detailed information about a pulse/group including indicators from Elasticsearch.
+
+    Supports IDs like:
+    - actor-{name}: Search by threat_actor
+    - malware-{name}: Search by malware_family
+    - Other: Search by source_ref (legacy pulse IDs)
     """
     from app.db.elasticsearch import get_es_client
 
     es = await get_es_client()
 
     try:
-        # Search for IOCs from this pulse (by source_ref)
+        # Build query based on ID type
+        must_clauses = [{"term": {"source_names": "otx"}}]
+
+        if pulse_id.startswith("actor-"):
+            actor_name = pulse_id[6:]  # Remove "actor-" prefix
+            must_clauses.append({"term": {"threat_actor.keyword": actor_name}})
+            display_name = f"Threat Actor: {actor_name}"
+            group_type = "actor"
+        elif pulse_id.startswith("malware-"):
+            malware_name = pulse_id[8:]  # Remove "malware-" prefix
+            must_clauses.append({"term": {"malware_family.keyword": malware_name}})
+            display_name = f"Malware: {malware_name}"
+            group_type = "malware"
+        else:
+            # Legacy: search by source_ref
+            must_clauses.append({
+                "nested": {
+                    "path": "sources",
+                    "query": {"term": {"sources.source_ref": pulse_id}}
+                }
+            })
+            display_name = f"OTX Pulse: {pulse_id}"
+            group_type = "pulse"
+
         body = {
             "size": 100,
+            "track_total_hits": True,
             "query": {
-                "bool": {
-                    "must": [
-                        {"term": {"source_names": "otx"}},
-                        {"nested": {
-                            "path": "sources",
-                            "query": {
-                                "term": {"sources.source_ref": pulse_id}
-                            }
-                        }}
-                    ]
-                }
+                "bool": {"must": must_clauses}
             },
             "sort": [{"last_seen": "desc"}]
         }
 
         result = await es.search(index="unified_iocs", body=body)
         hits = result.get("hits", {}).get("hits", [])
+        total_count = result.get("hits", {}).get("total", {}).get("value", 0)
 
         if not hits:
-            raise HTTPException(status_code=404, detail="Pulse not found")
+            raise HTTPException(status_code=404, detail="Pulse/group not found")
 
         # Aggregate info from first IOC
         first_ioc = hits[0]["_source"]
@@ -285,46 +305,61 @@ async def get_pulse_detail(
                 otx_source = src
                 break
 
-        # Build indicators list
+        # Build indicators list and collect unique tags
         indicators = []
         unique_tags = set()
+        ioc_types = {}
+
         for hit in hits:
             src = hit["_source"]
+            ioc_type = src.get("ioc_type", "unknown")
+            ioc_types[ioc_type] = ioc_types.get(ioc_type, 0) + 1
+
             indicators.append({
                 "id": hit["_id"],
-                "type": src.get("ioc_type"),
+                "type": ioc_type,
                 "value": src.get("ioc_value"),
                 "title": None,
-                "description": otx_source.get("context") if otx_source else None,
+                "description": src.get("context") or (otx_source.get("context") if otx_source else None),
                 "created": src.get("first_seen")
             })
             for tag in src.get("tags", []):
                 unique_tags.add(tag)
 
+        # Determine adversary/malware based on group type
+        adversary = first_ioc.get("threat_actor")
+        malware_families = []
+
+        if group_type == "actor":
+            adversary = pulse_id[6:]
+            malware_families = [first_ioc.get("malware_family")] if first_ioc.get("malware_family") else []
+        elif group_type == "malware":
+            malware_families = [pulse_id[8:]]
+
         return {
             "pulse": {
                 "id": pulse_id,
                 "pulse_id": pulse_id,
-                "name": f"OTX Pulse: {pulse_id}",
-                "description": otx_source.get("context") if otx_source else None,
+                "name": display_name,
+                "description": f"Contains {total_count} IOCs. Types: " + ", ".join(f"{k}: {v}" for k, v in sorted(ioc_types.items(), key=lambda x: -x[1])),
                 "author_name": "OTX",
                 "created": first_ioc.get("first_seen"),
                 "modified": first_ioc.get("last_seen"),
                 "tlp": first_ioc.get("tlp", "white"),
-                "adversary": first_ioc.get("threat_actor"),
+                "adversary": adversary,
                 "targeted_countries": first_ioc.get("targeted_countries", []),
                 "industries": [],
-                "tags": list(unique_tags),
+                "tags": list(unique_tags)[:20],  # Limit tags
                 "references": first_ioc.get("references", []),
-                "indicator_count": result.get("hits", {}).get("total", {}).get("value", 0),
+                "indicator_count": total_count,
                 "attack_ids": first_ioc.get("mitre_attack", []),
-                "malware_families": [first_ioc.get("malware_family")] if first_ioc.get("malware_family") else [],
+                "malware_families": malware_families,
                 "exported_to_misp": False,
                 "synced_at": datetime.now()
             },
             "indicators": indicators,
             "indicators_shown": len(indicators),
-            "indicators_total": result.get("hits", {}).get("total", {}).get("value", 0)
+            "indicators_total": total_count
         }
 
     except HTTPException:
